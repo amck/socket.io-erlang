@@ -102,7 +102,7 @@ handle_call({request, 'GET', [_Random, SessionId, "xhr-polling"|Resource], Req }
             #state{ server_module = ServerModule,
                     resource = Resource, sessions = Sessions } = State) ->
     case ets:lookup(Sessions, SessionId) of
-        [{SessionId, Pid}] -> 
+        [{SessionId, Pid, ConnectionReference}] -> 
             gen_server:cast(Pid, {'xhr-polling', polling_request, Req, From});
         _ ->
             gen_server:reply(From, apply(ServerModule, respond, [Req, 404, ""]))
@@ -115,7 +115,7 @@ handle_call({request, 'POST', ["send", SessionId, "xhr-polling"|Resource], Req }
                                                                                                  sessions = Sessions } = State) ->
     Response =  
         case ets:lookup(Sessions, SessionId) of
-            [{SessionId, Pid}] -> 
+            [{SessionId, Pid, ConnectionReference}] -> 
                 gen_server:call(Pid, {'xhr-polling', data, Req});
             _ ->
                 apply(ServerModule, respond, [Req, 404, ""])
@@ -132,7 +132,7 @@ handle_call({request, 'GET', [Index, _Random, SessionId, "jsonp-polling"|Resourc
                     server_module = ServerModule,
                     sessions = Sessions } = State) ->
     case ets:lookup(Sessions, SessionId) of
-        [{SessionId, Pid}] ->
+        [{SessionId, Pid, ConnectionReference}] ->
             gen_server:cast(Pid, {'jsonp-polling', polling_request, {Req, Index}, From});
         _ ->
             gen_server:reply(From, apply(ServerModule, respond, [Req, 404, ""]))
@@ -146,7 +146,7 @@ handle_call({request, 'POST', [_Index, _Random, SessionId, "jsonp-polling"|Resou
                     sessions = Sessions } = State) ->
     Response =  
         case ets:lookup(Sessions, SessionId) of
-            [{SessionId, Pid}] -> 
+            [{SessionId, Pid, ConnectionReference}] -> 
                 gen_server:call(Pid, {'jsonp-polling', data, Req});
             _ ->
                 apply(ServerModule, respond, [Req, 404, ""])
@@ -165,7 +165,7 @@ handle_call({request, 'POST', ["send", SessionId, "xhr-multipart"|Resource], Req
                     sessions = Sessions } = State) ->
     Response =  
         case ets:lookup(Sessions, SessionId) of
-            [{SessionId, Pid}] -> 
+            [{SessionId, Pid, ConnectionReference}] -> 
                 gen_server:call(Pid, {'xhr-multipart', data, Req});
             _ ->
                 apply(ServerModule, respond, [Req, 404, ""])
@@ -185,7 +185,7 @@ handle_call({request, 'POST', ["send", SessionId, "htmlfile"|Resource], Req }, _
                     sessions = Sessions } = State) ->
     Response =  
         case ets:lookup(Sessions, SessionId) of
-            [{SessionId, Pid}] -> 
+            [{SessionId, Pid, ConnectionReference}] -> 
                 gen_server:call(Pid, {'htmlfile', data, Req});
             _ ->
                 apply(ServerModule, respond, [Req, 404, ""])
@@ -214,7 +214,7 @@ handle_call({session, generate, ConnectionReference, Transport}, _From, #state{
     UUID = binary_to_list(ossp_uuid:make(v4, text)),
     {ok, Pid} = socketio_client:start(Sup, Transport, UUID, ServerModule, ConnectionReference, Port),
     link(Pid),
-    ets:insert(Sessions, [{UUID, Pid}, {Pid, UUID}]),
+    ets:insert(Sessions, [{UUID, Pid, ConnectionReference}, {Pid, UUID, ConnectionReference}]),
     gen_event:notify(EventManager, {client, Pid}),
     {reply, {UUID, Pid}, State};
 
@@ -252,10 +252,18 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info({'EXIT', Pid, _}, #state{ event_manager = EventManager, sessions = Sessions } = State) ->
     case ets:lookup(Sessions, Pid) of
-        [{Pid, UUID}] ->
+        [{Pid, UUID, ConnectionReference}] ->
             ets:delete(Sessions,UUID),
             ets:delete(Sessions,Pid),
-            gen_event:notify(EventManager, {disconnect, Pid});
+            gen_event:notify(EventManager, {disconnect, Pid}),
+            case ConnectionReference of 
+              {websocket,{misultin_ws,Ws}}->
+                % the misultin websocket connection is outside the socketio sup tree, so even if we kill the socketio processes, the websocket connection can hang around
+                % so lets explicity tell it to shutdown, preventing zombie socket processes and ensure that a client can always reconnect cleanly 
+                Ws ! shutdown;
+              _ ->
+                ignore
+            end;
         _ ->
             ignore
     end,
